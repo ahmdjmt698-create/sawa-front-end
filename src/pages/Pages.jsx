@@ -54,7 +54,8 @@ export function WatchPage() {
     </div>
   );
 
-  const mediaUrl = `http://127.0.0.1:8000/media/${video.file_path.split("/").pop()}`;
+  // ✅ FIX: use authenticated stream endpoint instead of direct /media/ URL
+  const mediaUrl = videosAPI.streamUrl(video.id);
 
   // انتقل للوقت المحدد من البحث
   const onVideoLoad = (e) => {
@@ -103,15 +104,8 @@ export function SharePage() {
     </div>
   );
 
-  const mediaUrl = `http://127.0.0.1:8000/media/${video.file_path.split("/").pop()}`;
-
-  // انتقل للوقت المحدد من البحث
-  const onVideoLoad = (e) => {
-    if (startTime > 0) {
-      e.target.currentTime = startTime;
-      e.target.play().catch(() => {});
-    }
-  };
+  // ✅ FIX: use share-token stream endpoint — no file_path exposure
+  const mediaUrl = videosAPI.shareStreamUrl(token);
 
   return (
     <div style={{ maxWidth: 1200, margin: "0 auto", padding: "24px 20px" }}>

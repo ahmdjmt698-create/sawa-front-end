@@ -2,6 +2,9 @@ import { useState } from "react";
 import { useNavigate, useSearchParams, Link } from "react-router-dom";
 import { useAuth } from "../hooks/useAuth";
 
+const PASSWORD_MIN = 8;
+const PASSWORD_MAX = 72;
+
 export default function Auth() {
   const [params]               = useSearchParams();
   const [mode, setMode]        = useState(params.get("mode") === "register" ? "register" : "login");
@@ -23,6 +26,11 @@ export default function Auth() {
         await login(email, password);
       } else {
         if (!name.trim()) { setError("يرجى إدخال اسمك"); setLoading(false); return; }
+        if (password.length < PASSWORD_MIN || password.length > PASSWORD_MAX) {
+          setError(`كلمة المرور يجب أن تكون بين ${PASSWORD_MIN} و${PASSWORD_MAX} حرفاً`);
+          setLoading(false);
+          return;
+        }
         await register(name, email, password);
       }
       navigate("/dashboard");
@@ -70,9 +78,30 @@ export default function Auth() {
               <label>البريد الإلكتروني</label>
               <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="example@email.com" required />
             </div>
+          {/* Client-side guard — mirrors backend constraints */}
+          {mode === "register" && password.length > 0 && (() => {
+            const len     = password.length;
+            const tooLong = len > PASSWORD_MAX;
+            const nearMax = len >= PASSWORD_MAX - 4;
+            const color   = tooLong ? "var(--red)" : nearMax ? "#F59E0B" : "var(--text-muted)";
+            return (
+              <div style={{ display: "flex", justifyContent: "flex-end", fontSize: 11, color, marginTop: -8, marginBottom: 2 }}>
+                {len}/{PASSWORD_MAX}
+                {tooLong && <span style={{ marginRight: 6 }}>— تجاوز الحد الأقصى</span>}
+              </div>
+            );
+          })()}
             <div>
               <label>كلمة المرور</label>
-              <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="8 أحرف على الأقل" minLength={6} required />
+              <input
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder={`${PASSWORD_MIN} أحرف على الأقل`}
+                minLength={PASSWORD_MIN}
+                maxLength={PASSWORD_MAX}
+                required
+              />
             </div>
 
             {error && (

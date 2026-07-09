@@ -8,10 +8,6 @@ const API_BASE = import.meta.env.VITE_API_URL
   ? `${import.meta.env.VITE_API_URL}/api`
   : "/api";
 
-const MEDIA_BASE = import.meta.env.VITE_API_URL
-  ? `${import.meta.env.VITE_API_URL}/media`
-  : "/media";
-
 function getToken() {
   return localStorage.getItem("sawa_token");
 }
@@ -97,8 +93,9 @@ export const videosAPI = {
   getByToken:  (tok) => request("GET", `/videos/share/${tok}`),
   deleteVideo: (id)  => request("DELETE", `/videos/${id}`),
 
-  // رابط الميديا المباشر
-  mediaUrl: (filePath) => `${MEDIA_BASE}/${filePath.split("/").pop()}`,
+  // روابط البث الآمنة — تمر عبر التحقق من الصلاحيات على الخادم
+  streamUrl:       (videoId)  => `${API_BASE}/videos/${videoId}/stream`,
+  shareStreamUrl:  (token)    => `${API_BASE}/videos/share/${token}/stream`,
 };
 
 // ── Transcripts ───────────────────────────────────────
