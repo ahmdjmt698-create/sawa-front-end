@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { videosAPI } from "../api/client";
 import { useAuth } from "../hooks/useAuth";
+import Analytics from "../components/Analytics";
 
 const STATUS_MAP = {
   pending:    { label: "في الانتظار", color: "#FCD34D", dot: "⏳" },
@@ -24,10 +25,11 @@ function formatDur(sec) {
 }
 
 export default function Dashboard() {
-  const [videos,   setVideos]   = useState([]);
-  const [loading,  setLoading]  = useState(true);
-  const [deleting, setDeleting] = useState(null);
-  const [copied,   setCopied]   = useState(null);
+  const [videos,       setVideos]       = useState([]);
+  const [loading,      setLoading]      = useState(true);
+  const [deleting,     setDeleting]     = useState(null);
+  const [copied,       setCopied]       = useState(null);
+  const [analyticsId,  setAnalyticsId]  = useState(null);
 
   const { user } = useAuth();
   const navigate  = useNavigate();
@@ -107,7 +109,7 @@ export default function Dashboard() {
             >
               {/* ثامبنيل */}
               <div style={{ width: 80, height: 50, borderRadius: 8, background: "linear-gradient(135deg, #34D39920, #818CF820)", border: "1px solid var(--border)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, fontSize: 20 }}>
-                🖥️
+                {v.hls_ready ? "🎬" : "🖥️"}
               </div>
 
               {/* معلومات */}
@@ -124,11 +126,25 @@ export default function Dashboard() {
                   <span style={{ fontSize: 11, background: ts.color + "20", color: ts.color, borderRadius: 6, padding: "1px 7px", fontWeight: 600 }}>
                     {ts.dot} {ts.label}
                   </span>
+                  {v.hls_ready && (
+                    <span style={{ fontSize: 11, background: "#60A5FA20", color: "#60A5FA", borderRadius: 6, padding: "1px 7px", fontWeight: 600 }}>
+                      🎬 HLS
+                    </span>
+                  )}
                 </div>
               </div>
 
               {/* أزرار */}
               <div style={{ display: "flex", gap: 6, flexShrink: 0 }} onClick={(e) => e.stopPropagation()}>
+                {/* زر التحليلات */}
+                <button
+                  className="btn btn-outline"
+                  style={{ padding: "5px 10px", fontSize: 11 }}
+                  onClick={() => setAnalyticsId(v.id)}
+                  title="تحليلات الفيديو"
+                >
+                  📊
+                </button>
                 <button
                   className="btn btn-outline"
                   style={{ padding: "5px 10px", fontSize: 11 }}
@@ -150,6 +166,11 @@ export default function Dashboard() {
           );
         })}
       </div>
+
+      {/* مودال التحليلات */}
+      {analyticsId && (
+        <Analytics videoId={analyticsId} onClose={() => setAnalyticsId(null)} />
+      )}
     </div>
   );
 }

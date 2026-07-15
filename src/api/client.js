@@ -8,28 +8,23 @@ const API_BASE = import.meta.env.VITE_API_URL
   ? `${import.meta.env.VITE_API_URL}/api`
   : "/api";
 
-function getToken() {
-  return localStorage.getItem("sawa_token");
-}
-
-function authHeaders() {
-  const token = getToken();
-  return token ? { Authorization: `Bearer ${token}` } : {};
-}
-
 async function request(method, path, body, isFormData = false) {
-  const headers = { ...authHeaders() };
+  const headers = {};
   if (!isFormData && body) headers["Content-Type"] = "application/json";
 
   const res = await fetch(`${API_BASE}${path}`, {
     method,
     headers,
+    credentials: "include",
     body: isFormData ? body : body ? JSON.stringify(body) : undefined,
   });
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: "خطأ غير متوقع" }));
-    throw new Error(err.detail || "فشل الطلب");
+    const error = new Error(err.detail || "فشل الطلب");
+    error.status = res.status;
+    error.detail = err.detail;
+    throw error;
   }
   if (res.status === 204) return null;
   return res.json();
@@ -40,19 +35,10 @@ export const authAPI = {
   register: (name, email, password) =>
     request("POST", "/auth/register", { name, email, password }),
 
-  login: async (email, password) => {
-    const form = new FormData();
-    form.append("username", email);
-    form.append("password", password);
-    const res = await fetch(`${API_BASE}/auth/login`, {
-      method: "POST",
-      headers: authHeaders(),
-      body: form,
-    });
-    if (!res.ok) throw new Error((await res.json().catch(()=>({}))).detail || "فشل");
-    return res.json();
-  },
+  login: (email, password) =>
+  request("POST", "/auth/login", { email, password }),
 
+  logout: () => request("POST", "/auth/logout"),
   me: () => request("GET", "/auth/me"),
 };
 
@@ -67,8 +53,7 @@ export const videosAPI = {
 
       const xhr = new XMLHttpRequest();
       xhr.open("POST", `${API_BASE}/videos/upload`);
-      const token = getToken();
-      if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+      xhr.withCredentials = true;
 
       if (onProgress) {
         xhr.upload.onprogress = (e) => {
@@ -93,9 +78,16 @@ export const videosAPI = {
   getByToken:  (tok) => request("GET", `/videos/share/${tok}`),
   deleteVideo: (id)  => request("DELETE", `/videos/${id}`),
 
-  // روابط البث الآمنة — تمر عبر التحقق من الصلاحيات على الخادم
+  // Feature 4: إعدادات المشاركة المحمية
+  updateShareSettings: (id, data) => request("PATCH", `/videos/${id}/share-settings`, data),
+  unlockShare: (token, password)  => request("POST",  `/videos/share/${token}/unlock`, { password }),
+
+  // روابط البث الآمنة
   streamUrl:       (videoId)  => `${API_BASE}/videos/${videoId}/stream`,
   shareStreamUrl:  (token)    => `${API_BASE}/videos/share/${token}/stream`,
+
+  // Feature 6: HLS
+  hlsUrl: (videoId) => `${API_BASE}/videos/${videoId}/hls/playlist.m3u8`,
 };
 
 // ── Transcripts ───────────────────────────────────────
@@ -108,10 +100,28 @@ export const transcriptAPI = {
 
 // ── AI Features ───────────────────────────────────────
 export const aiAPI = {
-  translate:  (videoId)             => request("POST", `/transcripts/${videoId}/translate`),
-  summarize:  (videoId)             => request("POST", `/transcripts/${videoId}/summarize`),
-  diarize:    (videoId, n)          => request("POST", `/transcripts/${videoId}/diarize${n?`?num_speakers=${n}`:""}`),
-  exportUrl:  (videoId, fmt)        => `${API_BASE}/transcripts/${videoId}/export?fmt=${fmt}`,
+  translate:  (videoId)    => request("POST", `/transcripts/${videoId}/translate`),
+  summarize:  (videoId)    => request("POST", `/transcripts/${videoId}/summarize`),
+  diarize:    (videoId, n) => request("POST", `/transcripts/${videoId}/diarize${n?`?num_speakers=${n}`:""}`),
+  exportUrl:  (videoId, fmt) => `${API_BASE}/transcripts/${videoId}/export?fmt=${fmt}`,
+
+  // Feature 2: الفصول الذكية
+  generateChapters: (videoId) => request("POST", `/transcripts/${videoId}/chapters`),
+  getChapters:      (videoId) => request("GET",  `/transcripts/${videoId}/chapters`),
+};
+
+// ── Comments ──────────────────────────────────────────
+export const commentsAPI = {
+  list:   (videoId)       => request("GET",    `/videos/${videoId}/comments`),
+  add:    (videoId, data) => request("POST",   `/videos/${videoId}/comments`, data),
+  delete: (commentId)     => request("DELETE", `/videos/comment/${commentId}`),
+};
+
+// ── Analytics ─────────────────────────────────────────
+export const analyticsAPI = {
+  ping: (videoId, secondsWatched) =>
+    request("POST", `/videos/${videoId}/view-event`, { seconds_watched: secondsWatched }),
+  get:  (videoId) => request("GET", `/videos/${videoId}/analytics`),
 };
 
 // ── Payments ──────────────────────────────────────────

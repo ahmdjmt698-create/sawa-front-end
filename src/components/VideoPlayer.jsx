@@ -1,25 +1,100 @@
 /**
- * مشغّل الفيديو مع النص المفرَّغ + الميزات الذكية
+ * مشغّل الفيديو مع النص المفرَّغ + الميزات الذكية + التعليقات + HLS
  */
 import { useState, useRef, useEffect } from "react";
-import { transcriptAPI, aiAPI } from "../api/client";
+import { transcriptAPI, aiAPI, commentsAPI, analyticsAPI, videosAPI } from "../api/client";
 import AIFeatures from "./AIFeatures";
+import { useAuth } from "../hooks/useAuth";
 
-export default function VideoPlayer({ video, mediaUrl }) {
+// Optional import for HLS (we'll check dynamically or assume it's bundled if imported)
+// For a standard Vite project, we just import it:
+import Hls from "hls.js";
+
+const SPEAKER_COLORS = ["#34D399","#818CF8","#F59E0B","#F472B6","#60A5FA","#C084FC"];
+const speakerColor = (name) => {
+  if (!name) return "var(--text-muted)";
+  const idx = parseInt(name.replace(/\D/g,"")) - 1 || 0;
+  return SPEAKER_COLORS[idx % SPEAKER_COLORS.length];
+};
+
+const fmtTime = (s) => `${Math.floor(s/60).toString().padStart(2,"0")}:${Math.floor(s%60).toString().padStart(2,"0")}`;
+
+export default function VideoPlayer({ video, mediaUrl, startTime = 0, tempToken = null }) {
   const [transcript,   setTranscript]   = useState(null);
   const [status,       setStatus]       = useState("loading");
   const [currentTime,  setCurrentTime]  = useState(0);
+  const [duration,     setDuration]     = useState(video?.duration || 0);
   const [activeIdx,    setActiveIdx]    = useState(-1);
   const [isEditing,    setIsEditing]    = useState(false);
   const [editText,     setEditText]     = useState("");
   const [copied,       setCopied]       = useState(false);
   const [showAI,       setShowAI]       = useState(false);
+  const [isHlsLoaded,  setIsHlsLoaded]  = useState(false);
+
+  // ── Feature 2: Smart Chapters ──
+  const [chapters, setChapters] = useState([]);
+  const [generatingChapters, setGeneratingChapters] = useState(false);
+
+  // ── Feature 3: Comments ──
+  const [comments, setComments] = useState([]);
+  const [commentText, setCommentText] = useState("");
+  const [authorName, setAuthorName] = useState("");
+  const [activeCommentId, setActiveCommentId] = useState(null);
+  const { user } = useAuth();
 
   const videoRef  = useRef(null);
+  const hlsRef    = useRef(null);
   const segRefs   = useRef({});
   const pollRef   = useRef(null);
+  const analyticsInterval = useRef(null);
+  const secondsWatched = useRef(0);
 
+  // ── تهيئة HLS (Feature 6) ──
+  useEffect(() => {
+    if (!video || !videoRef.current) return;
+    
+    // إذا كان hls_ready جاهزًا والمشغل يدعم HLS
+    if (video.hls_ready && Hls.isSupported()) {
+      const hls = new Hls({ maxBufferLength: 30 });
+      hlsRef.current = hls;
+      // نضيف التوكن إذا كان هناك رابط مشاركة محمي (لتبسيط الأمر مع hls، نفضل تمرير التوكن عبر headers أو query params)
+      // لكن Vercel/Cloudflare يتعاملون معها. في حالتنا hlsUrl في client لا تدعم توكن المشاركة المحمية،
+      // لذا HLS سيكون معطلاً للروابط المحمية إلا إذا أضفناه. للتبسيط، سنستخدم hls_ready للمشاهدة العادية.
+      
+      const streamSrc = (tempToken) ? `${videosAPI.hlsUrl(video.id)}?access_token=${tempToken}` : videosAPI.hlsUrl(video.id);
+      
+      hls.loadSource(streamSrc);
+      hls.attachMedia(videoRef.current);
+      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        setIsHlsLoaded(true);
+        if (startTime > 0) {
+          videoRef.current.currentTime = startTime;
+          videoRef.current.play().catch(()=>console.log("Auto-play blocked"));
+        }
+      });
+      hls.on(Hls.Events.ERROR, (e, data) => {
+        console.warn("HLS Error:", data);
+        if (data.fatal) hls.destroy();
+      });
+    } else {
+      // Fallback
+      videoRef.current.src = mediaUrl;
+      if (startTime > 0) {
+        videoRef.current.currentTime = startTime;
+      }
+    }
+
+    return () => {
+      if (hlsRef.current) {
+        hlsRef.current.destroy();
+      }
+    };
+  }, [video, mediaUrl, startTime, tempToken]);
+
+
+  // ── جلب البيانات (تفريغ، فصول، تعليقات) ──
   const fetchTranscript = async () => {
+    if (!video) return;
     try {
       const t = await transcriptAPI.get(video.id);
       setTranscript(t);
@@ -31,12 +106,31 @@ export default function VideoPlayer({ video, mediaUrl }) {
     } catch { setStatus("error"); }
   };
 
+  const fetchChapters = async () => {
+    if (!video) return;
+    try {
+      const res = await aiAPI.getChapters(video.id);
+      setChapters(res.chapters || []);
+    } catch (e) { console.error("Chapters load error:", e); }
+  };
+
+  const fetchComments = async () => {
+    if (!video) return;
+    try {
+      const res = await commentsAPI.list(video.id);
+      setComments(res || []);
+    } catch (e) { console.error("Comments load error:", e); }
+  };
+
   useEffect(() => {
     fetchTranscript();
+    fetchChapters();
+    fetchComments();
     return () => clearTimeout(pollRef.current);
-  }, [video.id]);
+  }, [video?.id]);
 
-  // مزامنة الوقت مع الجمل
+
+  // ── مزامنة النص والتوقيت ──
   useEffect(() => {
     if (!transcript?.segments) return;
     const idx = transcript.segments.findIndex(
@@ -50,6 +144,22 @@ export default function VideoPlayer({ video, mediaUrl }) {
     }
   }, [currentTime, transcript]);
 
+
+  // ── تحليلات المشاهدة (Feature 5) ──
+  useEffect(() => {
+    const isPlaying = () => videoRef.current && !videoRef.current.paused && !videoRef.current.ended;
+
+    analyticsInterval.current = setInterval(() => {
+      if (isPlaying()) {
+        secondsWatched.current += 30; // نضيف 30 ثانية للعداد
+        analyticsAPI.ping(video.id, secondsWatched.current).catch(console.error);
+      }
+    }, 30000); // كل 30 ثانية فعلياً
+
+    return () => clearInterval(analyticsInterval.current);
+  }, [video?.id]);
+
+
   const seekTo  = (t) => { if (videoRef.current) { videoRef.current.currentTime = t; videoRef.current.play(); } };
   const copyAll = () => { navigator.clipboard.writeText(transcript?.full_text || ""); setCopied(true); setTimeout(() => setCopied(false), 2000); };
 
@@ -61,26 +171,96 @@ export default function VideoPlayer({ video, mediaUrl }) {
     } catch (e) { alert("فشل الحفظ: " + e.message); }
   };
 
-  const fmtTime = (s) => `${Math.floor(s/60).toString().padStart(2,"0")}:${Math.floor(s%60).toString().padStart(2,"0")}`;
-
-  // ألوان المتحدثين
-  const SPEAKER_COLORS = ["#34D399","#818CF8","#F59E0B","#F472B6","#60A5FA","#C084FC"];
-  const speakerColor = (name) => {
-    if (!name) return "var(--text-muted)";
-    const idx = parseInt(name.replace(/\D/g,"")) - 1 || 0;
-    return SPEAKER_COLORS[idx % SPEAKER_COLORS.length];
+  // Feature 2
+  const handleGenerateChapters = async () => {
+    setGeneratingChapters(true);
+    try {
+      const res = await aiAPI.generateChapters(video.id);
+      setChapters(res.chapters);
+    } catch (e) {
+      alert("فشل توليد الفصول: " + e.message);
+    } finally {
+      setGeneratingChapters(false);
+    }
   };
+
+  // Feature 3
+  const handleAddComment = async (e) => {
+    e.preventDefault();
+    if (!commentText.trim()) return;
+    
+    try {
+      const c = await commentsAPI.add(video.id, {
+        timestamp_seconds: currentTime,
+        text: commentText,
+        author_name: user?.name || authorName || "زائر"
+      });
+      setComments([...comments, c].sort((a,b) => a.timestamp_seconds - b.timestamp_seconds));
+      setCommentText("");
+    } catch (e) {
+      alert("فشل إضافة التعليق: " + e.message);
+    }
+  };
+
+  const handleDeleteComment = async (id) => {
+    try {
+      await commentsAPI.delete(id);
+      setComments(comments.filter(c => c.id !== id));
+      setActiveCommentId(null);
+    } catch (e) {
+      alert("فشل حذف التعليق: " + e.message);
+    }
+  };
+
+  if (!video) return null;
 
   return (
     <div style={{ display:"grid", gridTemplateColumns:"1fr 380px", gap:20, alignItems:"start" }}>
 
       {/* ── عمود الفيديو ──────────────────────────── */}
       <div>
-        <div style={{ borderRadius:14, overflow:"hidden", background:"#000", border:"1px solid var(--border)", marginBottom:16 }}>
-          <video ref={videoRef} src={mediaUrl} controls
+        <div style={{ borderRadius:14, overflow:"hidden", background:"#000", border:"1px solid var(--border)", marginBottom:16, position: "relative" }}>
+          
+          <video ref={videoRef} controls
             style={{ width:"100%", display:"block", maxHeight:440 }}
             onTimeUpdate={(e) => setCurrentTime(e.target.currentTime)}
+            onLoadedMetadata={(e) => setDuration(e.target.duration)}
           />
+
+          {/* Feature 2 & 3: Timeline Overlays (Chapters & Comments) */}
+          {duration > 0 && (
+            <div style={{ position: "absolute", bottom: 44, left: 16, right: 16, height: 10, pointerEvents: "none" }}>
+              
+              {/* فصول */}
+              {chapters.map((ch, i) => {
+                const left = (ch.start / duration) * 100;
+                return (
+                  <div key={`ch-${i}`} 
+                    style={{ position: "absolute", left: `${left}%`, top: 0, bottom: 0, width: 2, background: "#818CF8", zIndex: 10 }}
+                    title={ch.title}
+                  />
+                );
+              })}
+
+              {/* تعليقات */}
+              {comments.map((c) => {
+                const left = (c.timestamp_seconds / duration) * 100;
+                const isActive = activeCommentId === c.id;
+                return (
+                  <div key={c.id} 
+                    style={{ position: "absolute", left: `calc(${left}% - 5px)`, top: -2, width: 10, height: 10, borderRadius: "50%", background: isActive ? "#34D399" : "#fff", border: "2px solid #000", zIndex: 20, pointerEvents: "auto", cursor: "pointer", transition: "transform 0.2s", transform: isActive ? "scale(1.5)" : "scale(1)" }}
+                    onClick={() => { setActiveCommentId(c.id); seekTo(c.timestamp_seconds); }}
+                  />
+                );
+              })}
+            </div>
+          )}
+
+          {video.hls_ready && isHlsLoaded && (
+            <div style={{ position: "absolute", top: 12, left: 12, background: "rgba(0,0,0,0.6)", padding: "2px 8px", borderRadius: 4, fontSize: 11, fontWeight: 700, color: "#fff", pointerEvents: "none" }}>
+              HLS
+            </div>
+          )}
         </div>
 
         {/* بيانات الفيديو */}
@@ -95,7 +275,7 @@ export default function VideoPlayer({ video, mediaUrl }) {
           {/* رابط المشاركة */}
           <div style={{ padding:"10px 14px", background:"var(--bg)", borderRadius:8, border:"1px solid var(--border)", display:"flex", gap:10, alignItems:"center" }}>
             <span style={{ fontSize:12, color:"var(--text-muted)", flexShrink:0 }}>🔗</span>
-            <span style={{ fontSize:12, color:"var(--green)", flex:1, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+            <span style={{ fontSize:12, color:"var(--green)", flex:1, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", direction:"ltr", textAlign:"left" }}>
               {window.location.origin}/share/{video.share_token}
             </span>
             <button className="btn btn-outline" style={{ padding:"4px 12px", fontSize:11, flexShrink:0 }}
@@ -106,7 +286,7 @@ export default function VideoPlayer({ video, mediaUrl }) {
         </div>
 
         {/* ── الميزات الذكية ────────────────────────── */}
-        <div className="card">
+        <div className="card" style={{ marginBottom:16 }}>
           <button
             onClick={() => setShowAI(!showAI)}
             style={{ width:"100%", display:"flex", justifyContent:"space-between", alignItems:"center", background:"none", border:"none", cursor:"pointer", fontFamily:"inherit", padding:0 }}
@@ -128,6 +308,69 @@ export default function VideoPlayer({ video, mediaUrl }) {
             </div>
           )}
         </div>
+
+        {/* ── Feature 2: فصول الفيديو ────────────────────────── */}
+        <div className="card" style={{ marginBottom:16 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+            <h3 style={{ fontSize: 16, fontWeight: 700 }}>📑 فصول الفيديو</h3>
+            {status === "done" && chapters.length === 0 && (
+              <button className="btn btn-outline" style={{ fontSize: 11, padding: "4px 12px" }} onClick={handleGenerateChapters} disabled={generatingChapters}>
+                {generatingChapters ? "جاري الإنشاء..." : "إنشاء فصول ذكية ✨"}
+              </button>
+            )}
+          </div>
+
+          {chapters.length > 0 ? (
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 10 }}>
+              {chapters.map((ch, i) => (
+                <div key={i} onClick={() => seekTo(ch.start)} style={{ background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8, padding: 12, cursor: "pointer", transition: "border-color 0.2s" }} onMouseEnter={e => e.currentTarget.style.borderColor = "var(--purple)"} onMouseLeave={e => e.currentTarget.style.borderColor = "var(--border)"}>
+                  <div style={{ fontSize: 11, color: "var(--purple)", fontWeight: 700, marginBottom: 4 }}>{fmtTime(ch.start)}</div>
+                  <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>{ch.title}</div>
+                  <div style={{ fontSize: 11, color: "var(--text-muted)" }}>{ch.summary}</div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div style={{ color: "var(--text-muted)", fontSize: 13, textAlign: "center", padding: "10px 0" }}>لا توجد فصول بعد.</div>
+          )}
+        </div>
+
+        {/* ── Feature 3: التعليقات ────────────────────────── */}
+        <div className="card">
+          <h3 style={{ fontSize: 16, fontWeight: 700, marginBottom: 16 }}>💬 التعليقات</h3>
+          
+          <form onSubmit={handleAddComment} style={{ display: "flex", gap: 10, marginBottom: 20 }}>
+            {!user && (
+              <input type="text" placeholder="الاسم (زائر)" value={authorName} onChange={e => setAuthorName(e.target.value)} style={{ width: 120, fontSize: 12 }} />
+            )}
+            <input type="text" placeholder={`أضف تعليقاً عند ${fmtTime(currentTime)}...`} value={commentText} onChange={e => setCommentText(e.target.value)} style={{ flex: 1, fontSize: 13 }} />
+            <button type="submit" className="btn btn-primary" style={{ padding: "0 16px" }}>إرسال</button>
+          </form>
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            {comments.length === 0 && <div style={{ color: "var(--text-muted)", fontSize: 13, textAlign: "center" }}>كن أول من يعلق على هذا التسجيل.</div>}
+            
+            {comments.map(c => (
+              <div key={c.id} style={{ display: "flex", gap: 12, alignItems: "flex-start", background: activeCommentId === c.id ? "#34D39910" : "transparent", padding: "8px", borderRadius: 8, transition: "background 0.2s" }}>
+                <div style={{ width: 32, height: 32, borderRadius: "50%", background: "var(--border)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14, flexShrink: 0 }}>
+                  {c.author_name.charAt(0).toUpperCase()}
+                </div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ display: "flex", gap: 8, alignItems: "baseline", marginBottom: 4 }}>
+                    <span style={{ fontSize: 13, fontWeight: 700 }}>{c.author_name}</span>
+                    <span onClick={() => seekTo(c.timestamp_seconds)} style={{ fontSize: 11, color: "var(--purple)", cursor: "pointer" }} className="badge">{fmtTime(c.timestamp_seconds)}</span>
+                  </div>
+                  <div style={{ fontSize: 13, color: "var(--text)" }}>{c.text}</div>
+                </div>
+                {/* Delete button (only for author or video owner) */}
+                {(user && (user.id === c.user_id || user.id === video.owner_id)) && (
+                  <button onClick={() => handleDeleteComment(c.id)} style={{ background: "none", border: "none", color: "var(--red)", cursor: "pointer", opacity: 0.5, fontSize: 12 }} title="حذف">🗑</button>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+
       </div>
 
       {/* ── عمود التفريغ ──────────────────────────── */}
@@ -225,7 +468,7 @@ export default function VideoPlayer({ video, mediaUrl }) {
           </div>
         )}
 
-        {/* تصدير — محدّث بـ docx */}
+        {/* تصدير */}
         {status === "done" && (
           <div style={{ borderTop:"1px solid var(--border)", paddingTop:12, marginTop:8, flexShrink:0 }}>
             <div style={{ fontSize:11, color:"var(--text-muted)", marginBottom:8 }}>تصدير النص</div>
