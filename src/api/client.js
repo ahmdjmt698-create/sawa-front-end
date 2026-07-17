@@ -1,16 +1,35 @@
 /**
  * API Client — يعمل في التطوير والإنتاج
+ * يدعم الكوكيز httpOnly + CSRF + تجديد التوكن التلقائي
  */
 
-// في الإنتاج: VITE_API_URL = رابط Render
-// في التطوير: فارغ (الـ proxy في vite.config.js يتولى الأمر)
 const API_BASE = import.meta.env.VITE_API_URL
   ? `${import.meta.env.VITE_API_URL}/api`
   : "/api";
 
-async function request(method, path, body, isFormData = false) {
+let csrfToken = null;
+
+async function initCsrf() {
+  try {
+    const res = await fetch(`${API_BASE}/auth/csrf-token`, { credentials: "include" });
+    if (res.ok) {
+      const data = await res.json();
+      csrfToken = data.csrf_token;
+    }
+  } catch { /* CSRF init is best-effort */ }
+}
+
+// استدعِ CSRF عند بدء التطبيق
+initCsrf();
+
+async function request(method, path, body, isFormData = false, isRetry = false) {
   const headers = {};
   if (!isFormData && body) headers["Content-Type"] = "application/json";
+
+  // أضف CSRF token للطلبات غير GET
+  if (method !== "GET" && csrfToken) {
+    headers["X-CSRF-Token"] = csrfToken;
+  }
 
   const res = await fetch(`${API_BASE}${path}`, {
     method,
@@ -19,11 +38,28 @@ async function request(method, path, body, isFormData = false) {
     body: isFormData ? body : body ? JSON.stringify(body) : undefined,
   });
 
+  // تجديد التوكن التلقائي عند 401
+  if (res.status === 401 && !isRetry && !path.includes("/auth/")) {
+    try {
+      const refreshRes = await fetch(`${API_BASE}/auth/refresh`, {
+        method: "POST",
+        credentials: "include",
+      });
+      if (refreshRes.ok) {
+        return request(method, path, body, isFormData, true);
+      }
+    } catch { /* refresh failed */ }
+    // أعد توجيه المستخدم لصفحة الدخول
+    window.location.href = "/auth";
+    throw new Error("انتهت الصلاحية");
+  }
+
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: "خطأ غير متوقع" }));
     const error = new Error(err.detail || "فشل الطلب");
     error.status = res.status;
     error.detail = err.detail;
+    error.error_code = err.error_code;
     throw error;
   }
   if (res.status === 204) return null;
@@ -36,20 +72,33 @@ export const authAPI = {
     request("POST", "/auth/register", { name, email, password }),
 
   login: (email, password) =>
-  request("POST", "/auth/login", { email, password }),
+    request("POST", "/auth/login", { email, password }),
 
   logout: () => request("POST", "/auth/logout"),
   me: () => request("GET", "/auth/me"),
+  csrf: () => request("GET", "/auth/csrf-token"),
+
+  // إعدادات الحساب
+  updateName: (name) => request("PATCH", "/auth/settings/name", { name }),
+  updatePassword: (current_password, new_password) =>
+    request("PATCH", "/auth/settings/password", { current_password, new_password }),
+
+  // إعادة تعيين كلمة المرور
+  forgotPassword: (email) => request("POST", "/auth/forgot-password", { email }),
+  verifyOtp: (email, otp) => request("POST", "/auth/verify-otp", { email, otp }),
+  resetPassword: (reset_token, new_password) =>
+    request("POST", "/auth/reset-password", { reset_token, new_password }),
 };
 
 // ── Videos ───────────────────────────────────────────
 export const videosAPI = {
-  upload: (file, title, dialect = "ar", onProgress) => {
+  upload: (file, title, dialect = "ar", mode = "screen", onProgress) => {
     return new Promise((resolve, reject) => {
       const form = new FormData();
       form.append("file", file);
       form.append("title", title);
       form.append("dialect", dialect);
+      form.append("mode", mode);
 
       const xhr = new XMLHttpRequest();
       xhr.open("POST", `${API_BASE}/videos/upload`);
@@ -88,6 +137,7 @@ export const videosAPI = {
 
   // Feature 6: HLS
   hlsUrl: (videoId) => `${API_BASE}/videos/${videoId}/hls/playlist.m3u8`,
+  convertHls: (videoId) => request("POST", `/videos/${videoId}/hls/convert`),
 };
 
 // ── Transcripts ───────────────────────────────────────

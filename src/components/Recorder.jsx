@@ -1,25 +1,28 @@
 /**
  * مكوّن تسجيل الشاشة — قلب مشروع سوى
- * يستخدم MediaRecorder API المدمج في المتصفح
+ * يستخدم MediaRecorder API — يدعم الشاشة (سطح المكتب) والكاميرا (الجوال)
  */
 import { useState, useRef, useCallback } from "react";
 import { videosAPI } from "../api/client";
 
 const DIALECTS = [
   { value: "ar",    label: "عربي فصحى" },
-  { value: "ar-EG", label: "🇪🇬 مصري" },
-  { value: "ar-AE", label: "🇦🇪 خليجي" },
-  { value: "ar-SY", label: "🇸🇾 شامي" },
-  { value: "ar-MA", label: "🇲🇦 مغاربي" },
-  { value: "ar-LY", label: "🇱🇾 ليبي" },
+  { value: "ar-EG", label: "مصري" },
+  { value: "ar-AE", label: "خليجي" },
+  { value: "ar-SY", label: "شامي" },
+  { value: "ar-MA", label: "مغاربي" },
+  { value: "ar-LY", label: "ليبي" },
 ];
 
+const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+
 export default function Recorder({ onUploadDone }) {
-  const [state, setState]       = useState("idle"); // idle|recording|paused|uploading|done
+  const [state, setState]       = useState("idle");
   const [duration, setDuration] = useState(0);
   const [progress, setProgress] = useState(0);
   const [title, setTitle]       = useState("");
   const [dialect, setDialect]   = useState("ar");
+  const [mode, setMode]         = useState(isMobile ? "camera" : "screen");
   const [error, setError]       = useState("");
   const [videoId, setVideoId]   = useState(null);
 
@@ -29,48 +32,59 @@ export default function Recorder({ onUploadDone }) {
   const timerRef         = useRef(null);
   const previewRef       = useRef(null);
 
-  // ── بدء التسجيل ──────────────────────────────────
   const startRecording = useCallback(async () => {
     setError("");
     try {
-      // اطلب شاشة + ميكروفون معاً
-      const screenStream = await navigator.mediaDevices.getDisplayMedia({
-        video: { frameRate: 30, cursor: "always" },
-        audio: true,
-      });
+      let combinedStream;
 
-      let micStream = null;
-      try {
-        micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      } catch {
-        console.warn("الميكروفون غير متاح — سيُسجَّل الصوت من الشاشة فقط");
-      }
+      if (mode === "camera" || isMobile) {
+        // تسجيل الكاميرا + الميكروفون (الجوال)
+        const camStream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: "user", width: { ideal: 1280 }, height: { ideal: 720 } },
+          audio: true,
+        });
+        combinedStream = camStream;
+      } else {
+        // تسجيل الشاشة + الميكروفون (سطح المكتب)
+        const screenStream = await navigator.mediaDevices.getDisplayMedia({
+          video: { frameRate: 30, cursor: "always" },
+          audio: true,
+        });
 
-      // ادمج مسارات الصوت إذا كان الميكروفون متاحاً
-      let combinedStream = screenStream;
-      if (micStream) {
-        const ctx    = new AudioContext();
-        const dest   = ctx.createMediaStreamDestination();
-        const scr    = ctx.createMediaStreamSource(screenStream);
-        const mic    = ctx.createMediaStreamSource(micStream);
-        scr.connect(dest);
-        mic.connect(dest);
+        let micStream = null;
+        try {
+          micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        } catch {
+          console.warn("الميكروفون غير متاح — سيُسجَّل الصوت من الشاشة فقط");
+        }
 
-        combinedStream = new MediaStream([
-          ...screenStream.getVideoTracks(),
-          ...dest.stream.getAudioTracks(),
-        ]);
+        if (micStream) {
+          const ctx  = new AudioContext();
+          const dest = ctx.createMediaStreamDestination();
+          const scr  = ctx.createMediaStreamSource(screenStream);
+          const mic  = ctx.createMediaStreamSource(micStream);
+          scr.connect(dest);
+          mic.connect(dest);
+
+          combinedStream = new MediaStream([
+            ...screenStream.getVideoTracks(),
+            ...dest.stream.getAudioTracks(),
+          ]);
+        } else {
+          combinedStream = screenStream;
+        }
+
+        // إذا توقف المستخدم عن مشاركة الشاشة
+        combinedStream.getVideoTracks()[0].onended = () => stopRecording();
       }
 
       streamRef.current = combinedStream;
 
-      // عرض معاينة مباشرة
       if (previewRef.current) {
         previewRef.current.srcObject = combinedStream;
         previewRef.current.play().catch(() => {});
       }
 
-      // ابدأ التسجيل
       const recorder = new MediaRecorder(combinedStream, {
         mimeType: MediaRecorder.isTypeSupported("video/webm;codecs=vp9")
           ? "video/webm;codecs=vp9"
@@ -83,29 +97,24 @@ export default function Recorder({ onUploadDone }) {
       };
 
       recorder.onstop = () => handleRecordingStop();
-      recorder.start(1000); // قطعة كل ثانية
+      recorder.start(1000);
 
       mediaRecorderRef.current = recorder;
       setState("recording");
 
-      // عداد الوقت
       timerRef.current = setInterval(() => {
         setDuration((d) => d + 1);
       }, 1000);
 
-      // إذا توقف المستخدم عن مشاركة الشاشة
-      screenStream.getVideoTracks()[0].onended = () => stopRecording();
-
     } catch (err) {
       if (err.name === "NotAllowedError") {
-        setError("رُفض إذن تسجيل الشاشة. يرجى السماح والمحاولة مجدداً.");
+        setError("رُفض الإذن. يرجى السماح والمحاولة مجدداً.");
       } else {
         setError(`خطأ: ${err.message}`);
       }
     }
-  }, []);
+  }, [mode]);
 
-  // ── إيقاف مؤقت / استئناف ─────────────────────────
   const togglePause = () => {
     const rec = mediaRecorderRef.current;
     if (!rec) return;
@@ -120,7 +129,6 @@ export default function Recorder({ onUploadDone }) {
     }
   };
 
-  // ── إيقاف التسجيل ────────────────────────────────
   const stopRecording = () => {
     clearInterval(timerRef.current);
     mediaRecorderRef.current?.stop();
@@ -128,7 +136,6 @@ export default function Recorder({ onUploadDone }) {
     if (previewRef.current) previewRef.current.srcObject = null;
   };
 
-  // ── بعد انتهاء التسجيل: ارفع للسيرفر ────────────
   const handleRecordingStop = async () => {
     setState("uploading");
     setProgress(0);
@@ -143,6 +150,7 @@ export default function Recorder({ onUploadDone }) {
         file,
         title || `تسجيل ${new Date().toLocaleDateString("ar")}`,
         dialect,
+        mode,
         (pct) => setProgress(pct),
       );
       setVideoId(video.id);
@@ -154,28 +162,24 @@ export default function Recorder({ onUploadDone }) {
     }
   };
 
-  // ── تنسيق الوقت ──────────────────────────────────
   const formatTime = (s) => {
     const m = Math.floor(s / 60).toString().padStart(2, "0");
     const sec = (s % 60).toString().padStart(2, "0");
     return `${m}:${sec}`;
   };
 
-  // ══════════════════════════════════════════════════
-  //  واجهة المستخدم
-  // ══════════════════════════════════════════════════
   return (
     <div style={{ maxWidth: 600, margin: "0 auto" }}>
 
-      {/* ── معاينة التسجيل ────────────────────────── */}
       {(state === "recording" || state === "paused") && (
         <div style={{ position: "relative", marginBottom: 16, borderRadius: 14, overflow: "hidden", background: "#000", border: "2px solid #34D399" }}>
           <video
             ref={previewRef}
             muted
-            style={{ width: "100%", maxHeight: 300, display: "block" }}
+            autoPlay
+            playsInline
+            style={{ width: "100%", maxHeight: 300, display: "block", objectFit: "cover" }}
           />
-          {/* شارة التسجيل */}
           <div style={{ position: "absolute", top: 12, right: 12, display: "flex", gap: 8, alignItems: "center", background: "#000000aa", borderRadius: 20, padding: "4px 12px" }}>
             <div style={{
               width: 10, height: 10, borderRadius: "50%",
@@ -189,11 +193,29 @@ export default function Recorder({ onUploadDone }) {
         </div>
       )}
 
-      {/* ── الإعدادات (قبل البدء) ─────────────────── */}
       {state === "idle" && (
         <div className="card fade-in" style={{ marginBottom: 16 }}>
+          {isMobile && (
+            <div style={{ padding: "12px 16px", background: "#818CF815", border: "1px solid #818CF833", borderRadius: 10, fontSize: 13, color: "#818CF8", marginBottom: 16, textAlign: "center" }}>
+              تسجيل الشاشة متاح على الكمبيوتر فقط. يمكنك تسجيل الكاميرا والميكروفون هنا.
+            </div>
+          )}
+
+          {!isMobile && (
+            <div style={{ display: "flex", background: "var(--bg)", borderRadius: 10, padding: 4, marginBottom: 16 }}>
+              {[["screen", "تسجيل الشاشة"], ["camera", "الكاميرا"]].map(([m, label]) => (
+                <button key={m} onClick={() => setMode(m)}
+                  style={{ flex: 1, padding: "8px", borderRadius: 8, border: "none", fontFamily: "var(--font)", fontSize: 13, fontWeight: 600, cursor: "pointer", background: mode === m ? "var(--bg-card)" : "transparent", color: mode === m ? "var(--text)" : "var(--text-muted)", transition: "all 0.2s" }}>
+                  {label}
+                </button>
+              ))}
+            </div>
+          )}
+
           <div style={{ fontSize: 13, color: "var(--text-muted)", marginBottom: 16, textAlign: "center" }}>
-            🎙️ سيُسجَّل الصوت من الميكروفون والشاشة معاً
+            {mode === "camera" || isMobile
+              ? "سيُسجَّل الصوت والفيديو من الكاميرا والميكروفون"
+              : "سيُسجَّل الصوت من الميكروفون والشاشة معاً"}
           </div>
 
           <div style={{ marginBottom: 12 }}>
@@ -220,11 +242,10 @@ export default function Recorder({ onUploadDone }) {
         </div>
       )}
 
-      {/* ── أزرار التحكم ──────────────────────────── */}
       <div style={{ display: "flex", gap: 10, justifyContent: "center" }}>
         {state === "idle" && (
           <button className="btn btn-primary btn-lg" onClick={startRecording} style={{ width: "100%", justifyContent: "center" }}>
-            <span style={{ fontSize: 18 }}>⏺</span>
+            <span style={{ fontSize: 18 }}>{mode === "camera" || isMobile ? "📹" : "⏺"}</span>
             ابدأ التسجيل
           </button>
         )}
@@ -232,16 +253,15 @@ export default function Recorder({ onUploadDone }) {
         {(state === "recording" || state === "paused") && (
           <>
             <button className="btn btn-outline" onClick={togglePause}>
-              {state === "recording" ? "⏸ توقف مؤقت" : "▶ استأنف"}
+              {state === "recording" ? "توقف مؤقت" : "استأنف"}
             </button>
             <button className="btn btn-danger" onClick={stopRecording}>
-              ⏹ أنهِ وارفع
+              أنهِ وارفع
             </button>
           </>
         )}
       </div>
 
-      {/* ── شريط الرفع ────────────────────────────── */}
       {state === "uploading" && (
         <div className="card fade-in" style={{ textAlign: "center", marginTop: 16 }}>
           <div style={{ fontSize: 24, marginBottom: 12 }}>☁️</div>
@@ -253,7 +273,6 @@ export default function Recorder({ onUploadDone }) {
         </div>
       )}
 
-      {/* ── نجاح ──────────────────────────────────── */}
       {state === "done" && (
         <div className="card fade-in" style={{ textAlign: "center", marginTop: 16, border: "1px solid #34D39944" }}>
           <div style={{ fontSize: 32, marginBottom: 8 }}>✅</div>
@@ -270,7 +289,6 @@ export default function Recorder({ onUploadDone }) {
         </div>
       )}
 
-      {/* ── خطأ ───────────────────────────────────── */}
       {error && (
         <div style={{ marginTop: 12, padding: "12px 16px", background: "#F8717115", border: "1px solid #F8717133", borderRadius: 10, fontSize: 13, color: "#F87171" }}>
           {error}

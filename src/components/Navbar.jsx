@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Link, useNavigate, useLocation } from "react-router-dom";
 import { useAuth } from "../hooks/useAuth";
 
@@ -7,11 +7,23 @@ export default function Navbar() {
   const navigate         = useNavigate();
   const location         = useLocation();
   const [scrolled, setScrolled] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef(null);
 
   useEffect(() => {
     const onScroll = () => setScrolled(window.scrollY > 20);
     window.addEventListener("scroll", onScroll);
     return () => window.removeEventListener("scroll", onScroll);
+  }, []);
+
+  useEffect(() => {
+    const handleClickOutside = (e) => {
+      if (menuRef.current && !menuRef.current.contains(e.target)) {
+        setMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
   const isActive = (path) => location.pathname === path;
@@ -81,20 +93,57 @@ export default function Navbar() {
               <span style={{ fontSize: 12 }}>⏺</span> سجّل
             </Link>
 
-            {/* أفاتار */}
-            <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 12px", background: "#0d0d1a", border: "1px solid #1e1e30", borderRadius: 10, cursor: "pointer" }}
-              onClick={() => logout().then?.(() => navigate("/")) || (logout(), navigate("/"))}
-              title="اضغط للخروج"
-            >
+            {/* أفاتار مع قائمة منسدلة */}
+            <div ref={menuRef} style={{ position: "relative" }}>
               <div style={{
-                width: 26, height: 26, borderRadius: "50%",
-                background: "linear-gradient(135deg, #34D399, #818CF8)",
-                display: "flex", alignItems: "center", justifyContent: "center",
-                fontSize: 12, fontWeight: 800, color: "#000",
-              }}>
-                {user.name?.[0] || "؟"}
+                display: "flex", alignItems: "center", gap: 8, padding: "5px 12px",
+                background: "#0d0d1a", border: "1px solid #1e1e30", borderRadius: 10,
+                cursor: "pointer", transition: "border-color 0.2s",
+              }}
+                onClick={() => setMenuOpen(!menuOpen)}
+                onMouseEnter={(e) => e.currentTarget.style.borderColor = "#34D39966"}
+                onMouseLeave={(e) => e.currentTarget.style.borderColor = "#1e1e30"}
+              >
+                <div style={{
+                  width: 26, height: 26, borderRadius: "50%",
+                  background: "linear-gradient(135deg, #34D399, #818CF8)",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  fontSize: 12, fontWeight: 800, color: "#000",
+                }}>
+                  {user.name?.[0] || "؟"}
+                </div>
+                <span style={{ fontSize: 13, color: "#ccc" }}>{user.name?.split(" ")[0]}</span>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#666" strokeWidth="2" style={{ transform: menuOpen ? "rotate(180deg)" : "rotate(0deg)", transition: "transform 0.2s" }}>
+                  <polyline points="6 9 12 15 18 9" />
+                </svg>
               </div>
-              <span style={{ fontSize: 13, color: "#ccc" }}>{user.name?.split(" ")[0]}</span>
+
+              {menuOpen && (
+                <div style={{
+                  position: "absolute", top: "calc(100% + 6px)", right: 0,
+                  minWidth: 160, background: "#0d0d1a", border: "1px solid #1e1e30",
+                  borderRadius: 10, padding: "6px", boxShadow: "0 8px 32px rgba(0,0,0,0.4)",
+                  animation: "fadeIn 0.15s ease",
+                }}>
+                  <Link to="/settings" onClick={() => setMenuOpen(false)} style={{
+                    display: "block", padding: "8px 14px", borderRadius: 8,
+                    fontSize: 13, color: "#ccc", textDecoration: "none",
+                    transition: "background 0.15s",
+                  }}
+                    onMouseEnter={(e) => e.currentTarget.style.background = "#ffffff08"}
+                    onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}
+                  >الإعدادات</Link>
+                  <button onClick={() => { setMenuOpen(false); logout().then?.(() => navigate("/")) || (logout(), navigate("/")); }} style={{
+                    display: "block", width: "100%", padding: "8px 14px", borderRadius: 8,
+                    fontSize: 13, color: "var(--red)", textAlign: "right",
+                    background: "none", border: "none", cursor: "pointer", fontFamily: "var(--font)",
+                    transition: "background 0.15s",
+                  }}
+                    onMouseEnter={(e) => e.currentTarget.style.background = "#F8717110"}
+                    onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}
+                  >تسجيل الخروج</button>
+                </div>
+              )}
             </div>
           </>
         ) : (
